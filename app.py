@@ -1,5 +1,6 @@
 import streamlit as st
 import yfinance as yf
+import pandas as pd
 from supabase import create_client
 
 @st.cache_resource
@@ -69,4 +70,63 @@ elif page == "Add Transaction":
 # ---------- PORTFOLIO ----------
 elif page == "Portfolio":
     st.subheader("Portfolio")
-    st.info("Coming next — we'll build this from your transactions.")
+    txns = db.table("transactions").select("*").execute().data
+
+    if not txns:
+        st.info("No transactions yet. Add some on the 'Add Transaction' page.")
+    else:
+        df = pd.DataFrame(txns)
+        df["quantity"] = df["quantity"].astype(float)
+        df["price"] = df["price"].astype(float)
+        df["fees"] = df["fees"].fillna(0).astype(float)
+
+        holdings = []
+        for ticker, group in df.groupby("ticker"):
+            buys = group[group["action"] == "BUY"]
+            sells = group[group["action"] == "SELL"]
+            buy_qty = buys["quantity"].sum()
+            shares = buy_qty - sells["quantity"].sum()
+            if shares <= 0:
+                continue  # position closed, skip
+
+            buy_cost = (buys["quantity"] * buys["price"]).sum() + buys["fees"].sum()
+            avg_cost = buy_cost / buy_qty if buy_qty else 0
+            cost_basis = shares * avg_cost
+
+            try:
+                current_price = float(yf.Ticker(ticker).history(period="5d")["Close"].iloc[-1])
+            except Exception:
+                current_price = None
+
+            if current_price is not None:
+                market_value = shares * current_price
+                gain = market_value - cost_basis
+                gain_pct = (gain / cost_basis * 100) if cost_basis else 0
+            else:
+                market_value = gain = gain_pct = None
+
+            holdings.append({
+                "Ticker": ticker,
+                "Shares": round(shares, 4),
+                "Avg cost": round(avg_cost, 2),
+                "Cost basis": round(cost_basis, 2),
+                "Current price": round(current_price, 2) if current_price is not None else None,
+                "Market value": round(market_value, 2) if market_value is not None else None,
+                "Gain": round(gain, 2) if gain is not None else None,
+                "Gain %": round(gain_pct, 2) if gain_pct is not None else None,
+            })
+
+        if not holdings:
+            st.info("No open positions — everything has been sold.")
+        else:
+            st.dataframe(pd.DataFrame(holdings), use_container_width=True)
+
+            total_cost = sum(h["Cost basis"] for h in holdings)
+            mvs = [h["Market value"] for h in holdings if h["Market value"] is not None]
+            total_value = sum(mvs) if mvs else None
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total cost basis", f"{total_cost:,.2f}")
+            if total_value is not None:
+                c2.metric("Total market value", f"{total_value:,.2f}")
+                c3.metric("Total gain", f"{total_value - total_cost:,.2f}")

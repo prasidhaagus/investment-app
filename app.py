@@ -11,7 +11,7 @@ db = get_db()
 
 st.title("Investment App")
 
-page = st.sidebar.radio("Menu", ["Prices", "Add Transaction", "Portfolio"])
+page = st.sidebar.radio("Menu", ["Prices", "Add Transaction", "Portfolio", "Dividends"])
 
 # ---------- PRICES ----------
 if page == "Prices":
@@ -87,7 +87,7 @@ elif page == "Portfolio":
             buy_qty = buys["quantity"].sum()
             shares = buy_qty - sells["quantity"].sum()
             if shares <= 0:
-                continue  # position closed, skip
+                continue
 
             buy_cost = (buys["quantity"] * buys["price"]).sum() + buys["fees"].sum()
             avg_cost = buy_cost / buy_qty if buy_qty else 0
@@ -120,13 +120,57 @@ elif page == "Portfolio":
             st.info("No open positions — everything has been sold.")
         else:
             st.dataframe(pd.DataFrame(holdings), use_container_width=True)
-
             total_cost = sum(h["Cost basis"] for h in holdings)
             mvs = [h["Market value"] for h in holdings if h["Market value"] is not None]
             total_value = sum(mvs) if mvs else None
-
             c1, c2, c3 = st.columns(3)
             c1.metric("Total cost basis", f"{total_cost:,.2f}")
             if total_value is not None:
                 c2.metric("Total market value", f"{total_value:,.2f}")
                 c3.metric("Total gain", f"{total_value - total_cost:,.2f}")
+
+# ---------- DIVIDENDS ----------
+elif page == "Dividends":
+    st.subheader("Dividends")
+
+    with st.expander("➕ Log a dividend"):
+        d_ticker = st.text_input("Ticker", value="", key="div_ticker").upper().strip()
+        pay_date = st.date_input("Pay date", key="div_date")
+        amount = st.number_input("Amount received", min_value=0.0, step=0.01, key="div_amount")
+        d_notes = st.text_input("Notes (optional)", value="", key="div_notes")
+
+        if st.button("Save dividend"):
+            if not d_ticker or amount <= 0:
+                st.warning("Please enter a ticker and an amount above 0.")
+            else:
+                db.table("instruments").upsert({"ticker": d_ticker}).execute()
+                db.table("dividends").insert({
+                    "ticker": d_ticker,
+                    "pay_date": pay_date.isoformat(),
+                    "amount": float(amount),
+                    "notes": d_notes or None,
+                }).execute()
+                st.success(f"Saved dividend: {d_ticker} {amount:g}. ✅")
+
+    divs = db.table("dividends").select("*").order("pay_date", desc=True).execute().data
+    if not divs:
+        st.info("No dividends logged yet.")
+    else:
+        ddf = pd.DataFrame(divs)
+        ddf["amount"] = ddf["amount"].astype(float)
+
+        st.metric("Total dividend income", f"{ddf['amount'].sum():,.2f}")
+
+        by_ticker = ddf.groupby("ticker")["amount"].sum().reset_index()
+        by_ticker.columns = ["Ticker", "Total received"]
+        st.write("**By ticker**")
+        st.dataframe(by_ticker, use_container_width=True)
+
+        st.write("**All dividend payments**")
+        st.dataframe(
+            ddf[["pay_date", "ticker", "amount", "notes"]].rename(
+                columns={"pay_date": "Pay date", "ticker": "Ticker",
+                         "amount": "Amount", "notes": "Notes"}
+            ),
+            use_container_width=True,
+        )
